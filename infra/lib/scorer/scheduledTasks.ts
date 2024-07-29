@@ -1,5 +1,5 @@
 import * as awsx from "@pulumi/awsx";
-import { all, Input } from "@pulumi/pulumi";
+import { Input } from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import { ScorerService } from "./new_service";
@@ -99,118 +99,125 @@ export function createScheduledTask({
     scheduleExpression,
   });
 
-  const eventsStsAssumeRole = new aws.iam.Role(`${name}-eventsRole`, {
-    assumeRolePolicy: JSON.stringify({
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Action: "sts:AssumeRole",
-          Effect: "Allow",
-          Sid: "",
-          Principal: {
-            Service: "ecs-tasks.amazonaws.com",
-          },
-        },
-        {
-          Action: "sts:AssumeRole",
-          Effect: "Allow",
-          Sid: "",
-          Principal: {
-            Service: "events.amazonaws.com",
-          },
-        },
-      ],
-    }),
-    inlinePolicies: [
-      {
-        name: "allow_exec",
-        policy: JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Allow",
-              Action: [
-                "ssmmessages:CreateControlChannel",
-                "ssmmessages:CreateDataChannel",
-                "ssmmessages:OpenControlChannel",
-                "ssmmessages:OpenDataChannel",
-              ],
-              Resource: "*",
-            },
-          ],
-        }),
-      },
-      {
-        name: "allow_iam_secrets_access",
-        policy: all([scorerSecretManagerArn]).apply(
-          ([scorerSecretManagerArnStr]) =>
-            JSON.stringify({
-              Version: "2012-10-17",
-              Statement: [
-                {
-                  Action: ["secretsmanager:GetSecretValue"],
-                  Effect: "Allow",
-                  Resource: scorerSecretManagerArnStr,
-                },
-              ],
-            })
-        ),
-      },
-      {
-        name: "allow_run_task",
-        policy: task.taskDefinition.arn.apply((Resource) =>
-          JSON.stringify({
+  pulumi
+    .all([
+      task.taskDefinition.arn,
+      task.taskDefinition.taskRoleArn,
+      executionRole.arn,
+      scorerSecretManagerArn,
+    ])
+    .apply(
+      ([
+        taskDefinitionArn,
+        taskRoleArn,
+        executionRoleArn,
+        scorerSecretManagerArn,
+      ]) => {
+        const eventsStsAssumeRole = new aws.iam.Role(`${name}-eventsRole`, {
+          assumeRolePolicy: JSON.stringify({
             Version: "2012-10-17",
             Statement: [
               {
-                Action: ["ecs:RunTask"],
+                Action: "sts:AssumeRole",
                 Effect: "Allow",
-                Resource: Resource,
+                Sid: "",
+                Principal: {
+                  Service: "ecs-tasks.amazonaws.com",
+                },
+              },
+              {
+                Action: "sts:AssumeRole",
+                Effect: "Allow",
+                Sid: "",
+                Principal: {
+                  Service: "events.amazonaws.com",
+                },
               },
             ],
-          })
-        ),
-      },
-      {
-        name: "allow_pass_role",
-        policy: all([executionRole.arn, task.taskDefinition.taskRoleArn]).apply(
-          ([dpoppEcsRoleArn, weeklyDataDumpTaskRoleArn]) =>
-            JSON.stringify({
-              Version: "2012-10-17",
-              Statement: [
-                {
-                  Action: ["iam:PassRole"],
-                  Effect: "Allow",
-                  Resource: [dpoppEcsRoleArn, weeklyDataDumpTaskRoleArn],
-                },
-              ],
-            })
-        ),
-      },
-    ],
-    managedPolicyArns: [
-      "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
-    ],
-    tags: {
-      dpopp: "",
-    },
-  });
-
-  new aws.cloudwatch.EventTarget(`scheduled-${name}`, {
-    rule: scheduledEventRule.name,
-    arn: cluster.arn,
-    roleArn: eventsStsAssumeRole.arn,
-    ecsTarget: {
-      taskCount: 1,
-      taskDefinitionArn: task.taskDefinition.arn,
-      launchType: "FARGATE",
-      networkConfiguration: {
-        assignPublicIp: false,
-        securityGroups: [securityGroup.id],
-        subnets,
-      },
-    },
-  });
+          }),
+          inlinePolicies: [
+            {
+              name: "allow_exec",
+              policy: JSON.stringify({
+                Version: "2012-10-17",
+                Statement: [
+                  {
+                    Effect: "Allow",
+                    Action: [
+                      "ssmmessages:CreateControlChannel",
+                      "ssmmessages:CreateDataChannel",
+                      "ssmmessages:OpenControlChannel",
+                      "ssmmessages:OpenDataChannel",
+                    ],
+                    Resource: "*",
+                  },
+                ],
+              }),
+            },
+            {
+              name: "allow_iam_secrets_access",
+              policy: JSON.stringify({
+                Version: "2012-10-17",
+                Statement: [
+                  {
+                    Action: ["secretsmanager:GetSecretValue"],
+                    Effect: "Allow",
+                    Resource: scorerSecretManagerArn,
+                  },
+                ],
+              }),
+            },
+            {
+              name: "allow_run_task",
+              policy: JSON.stringify({
+                Version: "2012-10-17",
+                Statement: [
+                  {
+                    Action: ["ecs:RunTask"],
+                    Effect: "Allow",
+                    Resource: taskDefinitionArn,
+                  },
+                ],
+              }),
+            },
+            {
+              name: "allow_pass_role",
+              policy: JSON.stringify({
+                Version: "2012-10-17",
+                Statement: [
+                  {
+                    Action: ["iam:PassRole"],
+                    Effect: "Allow",
+                    Resource: [executionRoleArn, taskRoleArn],
+                  },
+                ],
+              }),
+            },
+          ],
+          managedPolicyArns: [
+            "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+          ],
+          tags: {
+            dpopp: "",
+          },
+        });
+        new aws.cloudwatch.EventTarget(`scheduled-${name}`, {
+          rule: scheduledEventRule.name,
+          arn: cluster.arn,
+          roleArn: eventsStsAssumeRole.arn,
+          ecsTarget: {
+            taskCount: 1,
+            taskDefinitionArn: task.taskDefinition.arn,
+            launchType: "FARGATE",
+            networkConfiguration: {
+              assignPublicIp: false,
+              securityGroups: [securityGroup.id],
+              subnets,
+            },
+          },
+        });
+      }
+    );
 
   if (alarmPeriodSeconds) {
     if (enableInvocationAlerts) {
